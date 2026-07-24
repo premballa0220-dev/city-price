@@ -1,0 +1,13 @@
+{
+  "name": "shopify-city-pricing",
+  "version": "1.0.0",
+  "description": "City-based dynamic pricing backend for Shopify",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.2",
+    "express": "^4.21.3"
+  }
+}
