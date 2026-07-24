@@ -2,9 +2,9 @@
   "name": "city-price-root",
   "version": "1.0.0",
   "private": true,
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "dotenv": "^16.4.2",
