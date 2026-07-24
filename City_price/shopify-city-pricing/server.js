@@ -184,6 +184,26 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'internal_error' });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+module.exports = async function handler(req, res) {
+  return new Promise((resolve, reject) => {
+    app(req, res, (err) => {
+      if (err) {
+        console.error(err);
+        if (!res.headersSent) {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: 'internal_error' }));
+        }
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+};
