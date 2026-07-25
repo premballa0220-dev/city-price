@@ -36,6 +36,10 @@ function normalizeCity(city) {
   return String(city || '').trim().toLowerCase();
 }
 
+function normalizeCityKey(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 function extractShopifyId(value) {
   if (!value) return null;
   const match = String(value).match(/(\d+)$/);
@@ -88,8 +92,19 @@ async function fetchVariantPrice(variantId, city) {
   if (metafieldValue) {
     try {
       const parsed = JSON.parse(metafieldValue);
-      if (typeof parsed === 'object' && parsed !== null && typeof parsed[city] === 'number') {
-        return { price: parsed[city] };
+      const normalized = {};
+      Object.entries(parsed || {}).forEach(([key, value]) => {
+        normalized[normalizeCityKey(key)] = value;
+      });
+      const rawPrice = normalized[city];
+      if (typeof rawPrice === 'number') {
+        return { price: rawPrice };
+      }
+      if (typeof rawPrice === 'string' && rawPrice.trim() !== '') {
+        const numeric = Number(rawPrice);
+        if (!Number.isNaN(numeric)) {
+          return { price: numeric };
+        }
       }
     } catch (err) {
       // invalid JSON - fall through to fallback price
@@ -170,6 +185,7 @@ app.post('/create-draft-order', async (req, res) => {
     });
 
     const data = await response.json().catch(() => ({}));
+    console.log('draft order response', { status: response.status, body: data });
 
     if (!response.ok) {
       return createErrorResponse(res, response.status, data?.error || 'draft_order_failed', {
@@ -177,7 +193,13 @@ app.post('/create-draft-order', async (req, res) => {
       });
     }
 
-    res.json({ invoiceUrl: data?.draft_order?.invoice_url || null });
+    const invoiceUrl = data?.draft_order?.invoice_url || data?.draft_order?.status_url || null;
+    res.json({
+      invoiceUrl,
+      statusUrl: data?.draft_order?.status_url || null,
+      draftOrderId: data?.draft_order?.id || null,
+      raw: data,
+    });
   } catch (error) {
     console.error(error);
     return createErrorResponse(res, 500, 'internal_error');
