@@ -145,6 +145,39 @@
     return container;
   }
 
+  function getVariantIdFromContainer(container) {
+    // common inputs/selects
+    const inputId = container.querySelector('input[name="id"], select[name="id"], input[name="id[]"]')?.value;
+    if (inputId) return inputId;
+
+    // data attributes on the container or descendants
+    const dataAttrs = ['data-variant-id', 'data-product-variant-id', 'data-product-id', 'data-id', 'data-variant', 'data-product-variant-id'];
+    for (const attr of dataAttrs) {
+      const attrVal = container.getAttribute(attr) || container.querySelector(`[${attr}]`)?.getAttribute(attr);
+      if (attrVal) return attrVal;
+    }
+
+    // look for any element with data-variant-id deeper
+    const deep = container.querySelector('[data-variant-id], [data-product-variant-id], [data-id], [data-product-id]');
+    if (deep) {
+      return deep.getAttribute('data-variant-id') || deep.getAttribute('data-product-variant-id') || deep.getAttribute('data-id') || deep.getAttribute('data-product-id');
+    }
+
+    // try to parse form action query parameters like ?id=123
+    const form = container.closest('form');
+    if (form && form.action) {
+      try {
+        const url = new URL(form.action, location.origin);
+        const idParam = url.searchParams.get('id') || url.searchParams.get('variant');
+        if (idParam) return idParam;
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    return null;
+  }
+
   function addSkeleton(element) {
     if (element.dataset.cityPriceSkeleton === 'true') return;
     element.dataset.cityPriceSkeleton = 'true';
@@ -174,7 +207,7 @@
 
   async function replacePrices() {
     const priceTargets = getVisibleVariantContainers();
-    const allTargets = priceTargets.map(({ container }) => ({ target: findPriceTarget(container), variantId: container.querySelector('input[name="id"], select[name="id"]')?.value || container.getAttribute('data-variant-id') || container.getAttribute('data-product-variant-id') || container.dataset.variantId || container.dataset.productVariantId }));
+    const allTargets = priceTargets.map(({ container }) => ({ target: findPriceTarget(container), variantId: getVariantIdFromContainer(container) }));
 
     if (!selectedCity) {
       allTargets.forEach(({ target }) => {
@@ -197,6 +230,8 @@
     }).filter(Boolean))];
 
     if (!uniqueVariantIds.length) {
+      // nothing to query — keep existing prices or show request
+      console.debug('city-pricing: no variant ids found in visible containers', allTargets);
       allTargets.forEach(({ target }) => {
         if (target) {
           removeSkeleton(target);
@@ -234,6 +269,7 @@
       });
 
       const data = await response.json();
+      console.debug('city-pricing: storefront nodes response', data);
       const priceMap = {};
       (data?.data?.nodes || []).forEach((node) => {
         const gid = node?.id;

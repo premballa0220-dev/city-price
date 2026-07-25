@@ -1,11 +1,10 @@
-
 (function () {
   const COOKIE_NAME = 'selected_city';
   const STORAGE_KEY = 'selected_city';
   const STORE_DOMAIN = 'vuprke-tx.myshopify.com';
   const API_VERSION = '2026-04';
   const STOREFRONT_TOKEN = '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';
-  const BACKEND_URL = 'https://city-price-28l04sh1g-premballa0220-3300s-projects.vercel.app/';
+  const BACKEND_URL = 'https://your-ngrok-or-railway-url.example';
   const CITY_LABELS = { mumbai: 'Mumbai', delhi: 'Delhi', silvassa: 'Silvassa' };
 
   let selectedCity = readCity();
@@ -126,7 +125,7 @@
     const containers = [];
     const seen = new Set();
 
-    document.querySelectorAll('form[action*="/cart/add"], .product-card, .product, .card, .grid-product__content, .cart__row, .cart-item, [data-variant-id], [data-product-variant-id]').forEach((container) => {
+    document.querySelectorAll('form[action*="/cart/add"], .product-card, .product, .card, .grid-product__content').forEach((container) => {
       const variantId = container.querySelector('input[name="id"], select[name="id"]')?.value || container.getAttribute('data-variant-id') || container.getAttribute('data-product-variant-id') || container.dataset.variantId || container.dataset.productVariantId;
       if (!variantId || seen.has(variantId)) return;
       seen.add(variantId);
@@ -222,9 +221,6 @@
                   metafield(namespace: "custom", key: "city_prices") {
                     value
                   }
-                  priceV2 {
-                    amount
-                  }
                 }
               }
             }
@@ -236,44 +232,27 @@
       const data = await response.json();
       const priceMap = {};
       (data?.data?.nodes || []).forEach((node) => {
-        const gid = node?.id;
-        const metafieldValue = node?.metafield?.value;
-        let cityPrice;
-        if (metafieldValue) {
-          try {
-            const parsed = JSON.parse(metafieldValue);
-            if (typeof parsed[selectedCity] === 'number') {
-              cityPrice = parsed[selectedCity];
-            }
-          } catch (err) {
-            // ignore invalid JSON
+        const value = node?.metafield?.value;
+        if (!value) return;
+        try {
+          const parsed = JSON.parse(value);
+          if (typeof parsed[selectedCity] === 'number') {
+            priceMap[node.id] = parsed[selectedCity];
           }
+        } catch (error) {
+          // Ignore invalid values and fall back to request pricing.
         }
-
-        const defaultPriceRaw = node?.priceV2?.amount;
-        const defaultPrice = defaultPriceRaw ? Number(defaultPriceRaw) : null;
-
-        priceMap[gid] = { cityPrice: typeof cityPrice === 'number' ? cityPrice : null, defaultPrice };
       });
 
       allTargets.forEach(({ target, variantId }) => {
         removeSkeleton(target);
-        const gid = variantId && variantId.startsWith('gid://')
+        const gid = variantId.startsWith('gid://')
           ? variantId
-          : variantId
-            ? `gid://shopify/ProductVariant/${variantId}`
-            : null;
-
-        const entry = gid ? priceMap[gid] : null;
-        const displayPrice = entry?.cityPrice ?? entry?.defaultPrice ?? null;
-
-        if (typeof displayPrice === 'number' && !Number.isNaN(displayPrice)) {
-          target.textContent = formatRupees(displayPrice);
-        } else if (entry && entry.defaultPrice == null) {
-          // We had a variant but no price information at all
-          target.textContent = 'Price on request';
+          : `gid://shopify/ProductVariant/${variantId}`;
+        const price = priceMap[gid];
+        if (typeof price === 'number') {
+          target.textContent = formatRupees(price);
         } else {
-          // No variant or fallback
           target.textContent = 'Price on request';
         }
       });
@@ -330,16 +309,9 @@
       return;
     }
 
-    // UX: disable checkout controls and show spinner
-    const checkoutButtons = Array.from(document.querySelectorAll('[name="checkout"], a[href="/checkout"], #checkout, .cart__checkout'));
-    checkoutButtons.forEach((b) => b.setAttribute('aria-disabled', 'true'));
-    showToast('Creating draft order...');
-
-    function cleanupUI() {
-      checkoutButtons.forEach((b) => b.removeAttribute('aria-disabled'));
-    }
-
-    fetch('/cart.js', { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+    fetch('/cart.js', {
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+    })
       .then((response) => response.json())
       .then((cart) => {
         const payload = {
@@ -351,49 +323,22 @@
           })),
         };
 
-        return fetch(`${BACKEND_URL.replace(/\/$/, '')}/create-draft-order`, {
+        return fetch(`${BACKEND_URL}/create-draft-order`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
-        }).then((res) => ({ res, payload }));
+        });
       })
-      .then(async ({ res, payload }) => {
-        let result = {};
-        try {
-          result = await res.json().catch(() => ({}));
-        } catch (err) {
-          // ignore
-        }
-
-        if (res.ok && result.invoiceUrl) {
-          // success: redirect to invoice URL
+      .then((response) => response.json())
+      .then((result) => {
+        if (result.invoiceUrl) {
           window.location.href = result.invoiceUrl;
-          return;
+        } else {
+          throw new Error('Draft order failed');
         }
-
-        // If draft creation failed, fallback to normal checkout but preserve attributes
-        cleanupUI();
-        showToast('Draft order creation failed — proceeding to checkout');
-
-        // Ensure cart has city attribute set, then navigate to checkout
-        await fetch('/cart/update.js', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-          body: JSON.stringify({ attributes: { city: selectedCity } }),
-        }).catch(() => {});
-
-        window.location.href = '/checkout';
       })
-      .catch((err) => {
-        console.error('Checkout/draft order error', err);
-        cleanupUI();
-        showToast('Something went wrong. Redirecting to checkout.');
-        // best-effort fallback
-        fetch('/cart/update.js', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-          body: JSON.stringify({ attributes: { city: selectedCity } }),
-        }).catch(() => {}).finally(() => (window.location.href = '/checkout'));
+      .catch(() => {
+        alert('Something went wrong. Please try again.');
       });
   }
 
@@ -410,30 +355,4 @@
   window.addEventListener('load', () => {
     replacePrices();
   });
-
-  // Debug helper: expose a method to fetch variant data from the storefront API for testing
-  window.cityPricingDebug = {
-    async fetchVariant(variantGid) {
-      try {
-        const ids = [variantGid.startsWith('gid://') ? variantGid : `gid://shopify/ProductVariant/${variantGid}`];
-        const resp = await fetch(`https://${STORE_DOMAIN}/api/${API_VERSION}/graphql.json`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Storefront-Access-Token': STOREFRONT_TOKEN,
-          },
-          body: JSON.stringify({
-            query: `query ($ids: [ID!]!) { nodes(ids: $ids) { ... on ProductVariant { id metafield(namespace: "custom", key: "city_prices") { value } priceV2 { amount } } } }`,
-            variables: { ids },
-          }),
-        });
-        const data = await resp.json();
-        console.log('cityPricingDebug.fetchVariant result:', data);
-        return data;
-      } catch (err) {
-        console.error('cityPricingDebug.fetchVariant error', err);
-        throw err;
-      }
-    },
-  };
 })();

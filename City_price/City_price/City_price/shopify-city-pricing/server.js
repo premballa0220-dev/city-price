@@ -51,7 +51,6 @@ function createErrorResponse(res, statusCode, error, extra = {}) {
 }
 
 async function fetchVariantPrice(variantId, city) {
-  // Query metafield and fallback priceV2 from Admin API
   const response = await fetch(`${getShopifyBaseUrl()}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
     method: 'POST',
     headers: getAdminHeaders(),
@@ -63,9 +62,6 @@ async function fetchVariantPrice(variantId, city) {
               id
               metafield(namespace: "custom", key: "city_prices") {
                 value
-              }
-              priceV2 {
-                amount
               }
             }
           }
@@ -81,29 +77,24 @@ async function fetchVariantPrice(variantId, city) {
   }
 
   const data = await response.json();
-  const node = data?.data?.node;
-  const metafieldValue = node?.metafield?.value;
+  const metafieldValue = data?.data?.node?.metafield?.value;
 
-  // Try to parse city price from metafield
-  if (metafieldValue) {
-    try {
-      const parsed = JSON.parse(metafieldValue);
-      if (typeof parsed === 'object' && parsed !== null && typeof parsed[city] === 'number') {
-        return { price: parsed[city] };
-      }
-    } catch (err) {
-      // invalid JSON - fall through to fallback price
-    }
+  if (!metafieldValue) {
+    return { error: 'price_not_found', variantId };
   }
 
-  // Fallback: use priceV2.amount if available
-  const defaultPriceRaw = node?.priceV2?.amount;
-  const defaultPrice = defaultPriceRaw ? Number(defaultPriceRaw) : null;
-  if (defaultPrice != null && !Number.isNaN(defaultPrice)) {
-    return { price: defaultPrice };
+  let parsed;
+  try {
+    parsed = JSON.parse(metafieldValue);
+  } catch (error) {
+    throw new Error(`Invalid city price metafield JSON for ${variantId}`);
   }
 
-  return { error: 'price_not_found', variantId };
+  if (typeof parsed !== 'object' || parsed === null || typeof parsed[city] !== 'number') {
+    return { error: 'price_not_found', variantId };
+  }
+
+  return { price: parsed[city] };
 }
 
 app.get('/health', (req, res) => {
