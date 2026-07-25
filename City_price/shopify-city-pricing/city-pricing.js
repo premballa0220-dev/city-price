@@ -126,8 +126,8 @@
     const containers = [];
     const seen = new Set();
 
-    document.querySelectorAll('form[action*="/cart/add"], .product-card, .product, .card, .grid-product__content, .cart__row, .cart-item, [data-variant-id], [data-product-variant-id]').forEach((container) => {
-      const variantId = container.querySelector('input[name="id"], select[name="id"]')?.value || container.getAttribute('data-variant-id') || container.getAttribute('data-product-variant-id') || container.dataset.variantId || container.dataset.productVariantId;
+    document.querySelectorAll('form[action*="/cart/add"], .product-card, .product, .card, .grid-product__content, .cart__row, .cart-item, .product-grid-item, .product-item, [data-variant-id], [data-product-variant-id], [data-variant], [data-product-id]').forEach((container) => {
+      const variantId = getVariantIdFromContainer(container);
       if (!variantId || seen.has(variantId)) return;
       seen.add(variantId);
       containers.push({ variantId, container });
@@ -137,12 +137,27 @@
   }
 
   function findPriceTarget(container) {
-    const selectors = ['.price', '.price__regular', '.price-item', '.product__price', '[data-product-price]'];
+    const selectors = [
+      '.price',
+      '.price__regular',
+      '.price-item',
+      '.price-item--regular',
+      '.price-item--sale',
+      '.product__price',
+      '.product-price',
+      '.price .current-price',
+      '[data-product-price]',
+      '[data-price]'
+    ];
     for (const selector of selectors) {
       const element = container.querySelector(selector);
       if (element) return element;
     }
     return container;
+  }
+
+  function normalizeCityKey(value) {
+    return String(value || '').trim().toLowerCase();
   }
 
   function getVariantIdFromContainer(container) {
@@ -207,7 +222,8 @@
 
   async function replacePrices() {
     const priceTargets = getVisibleVariantContainers();
-    const allTargets = priceTargets.map(({ container }) => ({ target: findPriceTarget(container), variantId: getVariantIdFromContainer(container) }));
+    const allTargets = priceTargets.map(({ container }) => ({ target: findPriceTarget(container), variantId: getVariantIdFromContainer(container), container }));
+    console.debug('city-pricing: target containers', allTargets.map(({ variantId, container }) => ({ variantId, selector: container.className, id: container.id })));
 
     if (!selectedCity) {
       allTargets.forEach(({ target }) => {
@@ -230,7 +246,7 @@
     }).filter(Boolean))];
 
     if (!uniqueVariantIds.length) {
-      // nothing to query — keep existing prices or show request
+
       console.debug('city-pricing: no variant ids found in visible containers', allTargets);
       allTargets.forEach(({ target }) => {
         if (target) {
@@ -274,15 +290,25 @@
       (data?.data?.nodes || []).forEach((node) => {
         const gid = node?.id;
         const metafieldValue = node?.metafield?.value;
-        let cityPrice;
+        let cityPrice = null;
         if (metafieldValue) {
           try {
             const parsed = JSON.parse(metafieldValue);
-            if (typeof parsed[selectedCity] === 'number') {
-              cityPrice = parsed[selectedCity];
+            const normalized = {};
+            Object.entries(parsed || {}).forEach(([key, value]) => {
+              normalized[normalizeCityKey(key)] = value;
+            });
+            const rawPrice = normalized[selectedCity];
+            if (typeof rawPrice === 'number') {
+              cityPrice = rawPrice;
+            } else if (typeof rawPrice === 'string' && rawPrice.trim() !== '') {
+              const numeric = Number(rawPrice);
+              if (!Number.isNaN(numeric)) {
+                cityPrice = numeric;
+              }
             }
           } catch (err) {
-            // ignore invalid JSON
+            console.warn('city-pricing: invalid metafield JSON', { gid, metafieldValue, error: err });
           }
         }
 
@@ -306,11 +332,14 @@
         if (typeof displayPrice === 'number' && !Number.isNaN(displayPrice)) {
           target.textContent = formatRupees(displayPrice);
         } else if (entry && entry.defaultPrice == null) {
-          // We had a variant but no price information at all
-          target.textContent = 'Price on request';
+          console.debug('city-pricing: variant has no price info', { gid, entry, variantId });
+          if (target) target.textContent = target.dataset.originalText || 'Price on request';
+        } else if (entry) {
+          console.debug('city-pricing: fallback request price', { gid, entry, variantId });
+          if (target) target.textContent = target.dataset.originalText || 'Price on request';
         } else {
-          // No variant or fallback
-          target.textContent = 'Price on request';
+          console.debug('city-pricing: no entry for gid', { gid, variantId, priceMap });
+          if (target) target.textContent = target.dataset.originalText || 'Price on request';
         }
       });
     } catch (error) {
@@ -406,6 +435,10 @@
           window.location.href = result.invoiceUrl;
           return;
         }
+        if (res.ok && result.statusUrl) {
+          window.location.href = result.statusUrl;
+          return;
+        }
 
         // If draft creation failed, fallback to normal checkout but preserve attributes
         cleanupUI();
@@ -446,6 +479,11 @@
   window.addEventListener('load', () => {
     replacePrices();
   });
+
+  const observer = new MutationObserver(() => {
+    replacePrices();
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
 
   // Debug helper: expose a method to fetch variant data from the storefront API for testing
   window.cityPricingDebug = {

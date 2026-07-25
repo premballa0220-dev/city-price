@@ -125,6 +125,10 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+app.get('/', (req, res) => {
+  res.send('City price backend is running');
+});
+
 app.post('/create-draft-order', async (req, res) => {
   const { city, customerId, cart } = req.body || {};
   const normalizedCity = normalizeCity(city);
