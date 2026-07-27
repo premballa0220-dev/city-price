@@ -2,7 +2,7 @@
 (function () {
   const COOKIE_NAME = 'selected_city';
   const STORAGE_KEY = 'selected_city';
-  const STORE_DOMAIN = 'vuprke-tx.myshopify.com';
+  const STORE_DOMAIN = 'admin.shopify.com/store/vuprke-tx';
   const API_VERSION = '2026-04';
   const STOREFRONT_TOKEN = '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';
   const BACKEND_URL = 'https://city-price-28l04sh1g-premballa0220-3300s-projects.vercel.app/';
