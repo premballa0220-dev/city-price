@@ -1,29 +1,39 @@
-const express = require('express');
-const dotenv = require('dotenv');
-
-dotenv.config();
+// server.js
+import express from 'express';
+import cors from 'cors';
 
 const app = express();
+
+// FIX: restrict CORS to your actual storefront instead of allowing all
+// origins — an open cors() lets any website call your draft-order endpoint.
+app.use(cors({ origin: 'https://masonmart.in' }));
 app.use(express.json());
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', 'https://masonmart.in');
-  res.header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
-app.use(express.urlencoded({ extended: true }));
 
-const SHOPIFY_CLIENT_ID = process.env.SHOPIFY_CLIENT_ID || '';
-const SHOPIFY_CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET || '';
-const SHOPIFY_ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN || '';
-const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN || 'vuprke-tx.myshopify.com';
-const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2025-01';
-const PORT = Number(process.env.PORT || 3000);
-
-function getShopifyBaseUrl() {
-  return `https://${SHOPIFY_STORE_DOMAIN}`;
+// ── Config ──────────────────────────────────────────────────────────────
+// FIX: this MUST be the *.myshopify.com domain, never the custom storefront
+// domain (masonmart.in) or the admin.shopify.com URL. Neither of those
+// serve the Admin API.
+function normalizeShopifyDomain(value) {
+  let domain = String(value || '').trim();
+  domain = domain.replace(/^https?:\/\//i, '').replace(/\/+$|\?.*$/, '');
+  if (domain.includes('admin.shopify.com/store/')) {
+    const storeHandle = domain.split('admin.shopify.com/store/')[1]?.split('/')[0];
+    if (storeHandle) domain = `${storeHandle}.myshopify.com`;
+  }
+  return domain;
 }
+
+const SHOPIFY_STORE_DOMAIN = normalizeShopifyDomain(
+  process.env.SHOPIFY_STORE_DOMAIN || 'vuprke-tx.myshopify.com'
+);
+const SHOPIFY_ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN || '';
+const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-07';
+
+if (!SHOPIFY_STORE_DOMAIN.endsWith('.myshopify.com')) {
+  throw new Error('Invalid SHOPIFY_STORE_DOMAIN. Expected format: store-name.myshopify.com');
+}
+
+const ADMIN_GRAPHQL_URL = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
 
 function getAdminHeaders() {
   return {
@@ -32,213 +42,218 @@ function getAdminHeaders() {
   };
 }
 
+async function shopifyGraphQL(query, variables) {
+  const response = await fetch(ADMIN_GRAPHQL_URL, {
+    method: 'POST',
+    headers: getAdminHeaders(),
+    body: JSON.stringify({ query, variables }),
+  });
+  const text = await response.text();
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`Non-JSON response from Shopify (status ${response.status}): ${text.slice(0, 500)}`);
+  }
+  return { ok: response.ok, status: response.status, json };
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
 function normalizeCity(city) {
   return String(city || '').trim().toLowerCase();
 }
 
-function normalizeCityKey(value) {
-  return String(value || '').trim().toLowerCase();
-}
-
-function extractShopifyId(value) {
+function toVariantGid(value) {
   if (!value) return null;
-  const match = String(value).match(/(\d+)$/);
-  return match ? Number(match[1]) : value;
+  const id = String(value).trim();
+  if (id.startsWith('gid://')) return id;
+  if (/^\d+$/.test(id)) return `gid://shopify/ProductVariant/${id}`;
+  return id;
 }
 
-function buildCartSummary(cart) {
-  return (cart || []).map((item) => `${item.variantId}:${item.quantity}`).join(',');
+function toCustomerGid(value) {
+  if (!value) return null;
+  const id = String(value).trim();
+  if (id.startsWith('gid://')) return id;
+  if (/^\d+$/.test(id)) return `gid://shopify/Customer/${id}`;
+  return id;
 }
 
-function createErrorResponse(res, statusCode, error, extra = {}) {
-  return res.status(statusCode).json({ error, ...extra });
-}
-
-async function fetchVariantPrice(variantId, city) {
-  // Query metafield and fallback priceV2 from Admin API
-  const response = await fetch(`${getShopifyBaseUrl()}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
-    method: 'POST',
-    headers: getAdminHeaders(),
-    body: JSON.stringify({
-      query: `
-        query ($id: ID!) {
-          node(id: $id) {
-            ... on ProductVariant {
-              id
-              metafield(namespace: "custom", key: "city_prices") {
-                value
-              }
-              priceV2 {
-                amount
-              }
-            }
-          }
-        }
-      `,
-      variables: { id: variantId },
-    }),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Shopify metafield lookup failed: ${response.status} ${text}`);
-  }
-
-  const data = await response.json();
-  const node = data?.data?.node;
+// FIX: parses YOUR actual metafield shape — a single JSON blob at
+// custom.city_prices, e.g. {"mumbai":1000,"delhi":1100,"silvassa":950} —
+// not a separate metafield per city.
+function resolveCityPrice(node, city) {
+  if (!node) return null;
   const metafieldValue = node?.metafield?.value;
-
-  // Try to parse city price from metafield
   if (metafieldValue) {
     try {
       const parsed = JSON.parse(metafieldValue);
       const normalized = {};
       Object.entries(parsed || {}).forEach(([key, value]) => {
-        normalized[normalizeCityKey(key)] = value;
+        normalized[String(key).trim().toLowerCase()] = value;
       });
       const rawPrice = normalized[city];
-      if (typeof rawPrice === 'number') {
-        return { price: rawPrice };
-      }
+      if (typeof rawPrice === 'number') return rawPrice;
       if (typeof rawPrice === 'string' && rawPrice.trim() !== '') {
         const numeric = Number(rawPrice);
-        if (!Number.isNaN(numeric)) {
-          return { price: numeric };
-        }
+        if (!Number.isNaN(numeric)) return numeric;
       }
     } catch (err) {
-      // invalid JSON - fall through to fallback price
+      console.warn('Invalid custom.city_prices metafield JSON for variant', node.id, err);
     }
   }
-
-  // Fallback: use priceV2.amount if available
-  const defaultPriceRaw = node?.priceV2?.amount;
-  const defaultPrice = defaultPriceRaw ? Number(defaultPriceRaw) : null;
-  if (defaultPrice != null && !Number.isNaN(defaultPrice)) {
-    return { price: defaultPrice };
-  }
-
-  return { error: 'price_not_found', variantId };
+  // Fall back to the variant's default price if no city-specific price is set
+  const priceValue = node?.price;
+  const defaultPrice = typeof priceValue === 'number' ? priceValue : Number(priceValue);
+  return Number.isNaN(defaultPrice) ? null : defaultPrice;
 }
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
+// ── Routes ──────────────────────────────────────────────────────────────
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/', (req, res) => res.send('City price backend is running'));
 
-app.get('/', (req, res) => {
-  res.send('City price backend is running');
-});
-
+// FIX: matches the ACTUAL payload your city-pricing.js sends:
+//   { city, customerId, cart: [{ variantId, quantity }] }
+// (not `cartItems` with plain numeric ids + a separate customer object —
+// that shape was never being sent by your live frontend.)
 app.post('/create-draft-order', async (req, res) => {
   const { city, customerId, cart } = req.body || {};
   const normalizedCity = normalizeCity(city);
 
   if (!normalizedCity || !Array.isArray(cart) || cart.length === 0) {
-    return createErrorResponse(res, 400, 'invalid_request');
+    return res.status(400).json({ error: 'invalid_request', details: 'city and a non-empty cart array are required' });
   }
 
-  if (!SHOPIFY_ADMIN_ACCESS_TOKEN || !SHOPIFY_STORE_DOMAIN) {
-    return createErrorResponse(res, 500, 'missing_shopify_credentials');
+  if (!SHOPIFY_ADMIN_ACCESS_TOKEN) {
+    return res.status(500).json({ error: 'missing_shopify_credentials' });
   }
 
-  const lineItems = [];
+  const normalizedCart = cart.map((item) => ({
+    variantId: toVariantGid(item?.variantId),
+    quantity: Number(item?.quantity || 0),
+  }));
+
+  if (normalizedCart.some((item) => !item.variantId || item.quantity <= 0)) {
+    return res.status(400).json({ error: 'invalid_cart_item', details: normalizedCart });
+  }
+
+  const uniqueVariantIds = [...new Set(normalizedCart.map((item) => item.variantId))];
 
   try {
-    for (const item of cart) {
-      const variantId = item?.variantId;
-      const quantity = Number(item?.quantity || 0);
+    // 1. Look up each variant's city_prices metafield + default price
+    const { ok, status, json: variantData } = await shopifyGraphQL(
+      `
+        query getVariantCityPrices($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on ProductVariant {
+              id
+              price
+              metafield(namespace: "custom", key: "city_prices") {
+                value
+              }
+            }
+          }
+        }
+      `,
+      { ids: uniqueVariantIds }
+    );
 
-      if (!variantId || !quantity) {
-        return createErrorResponse(res, 400, 'invalid_cart_item', { variantId: variantId || null });
-      }
-
-      const priceResult = await fetchVariantPrice(variantId, normalizedCity);
-      if (priceResult.error) {
-        return createErrorResponse(res, 422, 'price_not_found', { variantId });
-      }
-
-      lineItems.push({
-        variant_id: extractShopifyId(variantId),
-        quantity,
-        price: String(priceResult.price),
-      });
+    if (!ok) {
+      return res.status(status).json({ error: 'shopify_variant_lookup_failed', details: variantData });
+    }
+    if (variantData.errors?.length) {
+      return res.status(502).json({ error: 'shopify_variant_graphql_errors', errors: variantData.errors });
     }
 
-    const draftOrderPayload = {
-      draft_order: {
-        line_items: lineItems,
-        use_customer_default_address: Boolean(customerId),
-        tags: `city-${normalizedCity}`,
-        send_invoice: false,
-      },
-    };
-
-    if (customerId) {
-      draftOrderPayload.draft_order.customer = {
-        id: extractShopifyId(customerId),
-      };
-    }
-
-    const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] draft-order attempt city=${normalizedCity} cart=${buildCartSummary(cart)}`);
-
-    const response = await fetch(`${getShopifyBaseUrl()}/admin/api/${SHOPIFY_API_VERSION}/draft_orders.json`, {
-      method: 'POST',
-      headers: getAdminHeaders(),
-      body: JSON.stringify(draftOrderPayload),
+    const nodes = variantData?.data?.nodes || [];
+    const priceMap = {};
+    nodes.forEach((node) => {
+      if (!node?.id) return;
+      const price = resolveCityPrice(node, normalizedCity);
+      if (price != null) priceMap[node.id] = price;
     });
 
-    const data = await response.json().catch(() => ({}));
-    console.log('draft order response', { status: response.status, body: data });
-
-    if (!response.ok) {
-      return createErrorResponse(res, response.status, data?.error || 'draft_order_failed', {
-        details: data?.errors || null,
-      });
+    const missingPrices = normalizedCart.filter((item) => priceMap[item.variantId] == null);
+    if (missingPrices.length > 0) {
+      return res.status(422).json({ error: 'price_not_found', variants: missingPrices.map((i) => i.variantId) });
     }
 
-    const invoiceUrl = data?.draft_order?.invoice_url || data?.draft_order?.status_url || null;
-    res.json({
-      invoiceUrl,
-      statusUrl: data?.draft_order?.status_url || null,
-      draftOrderId: data?.draft_order?.id || null,
-      raw: data,
+    // 2. Build line items with the resolved city price tied to each real variant
+    const lineItems = normalizedCart.map((item) => ({
+      variantId: item.variantId,
+      quantity: item.quantity,
+      originalUnitPrice: priceMap[item.variantId].toFixed(2),
+    }));
+
+    // 3. Create the draft order via GraphQL (reliably overrides price per-line
+    //    while still keeping the real variant reference, unlike REST which
+    //    can silently ignore a custom price when variant_id is present)
+    const draftInput = {
+      lineItems,
+      tags: [`city-${normalizedCity}`],
+      note: `City: ${normalizedCity}`,
+      useCustomerDefaultAddress: Boolean(customerId),
+    };
+    if (customerId) {
+      draftInput.customerId = toCustomerGid(customerId);
+    }
+
+    const { ok: draftOk, status: draftStatus, json: draftData } = await shopifyGraphQL(
+      `
+        mutation draftOrderCreate($input: DraftOrderInput!) {
+          draftOrderCreate(input: $input) {
+            draftOrder {
+              id
+              name
+              invoiceUrl
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      { input: draftInput }
+    );
+
+    if (!draftOk) {
+      return res.status(draftStatus).json({ error: 'shopify_draft_order_failed', details: draftData });
+    }
+    if (draftData.errors?.length) {
+      return res.status(502).json({ error: 'shopify_draft_graphql_errors', errors: draftData.errors });
+    }
+
+    const result = draftData?.data?.draftOrderCreate;
+    const userErrors = result?.userErrors || [];
+    if (userErrors.length > 0) {
+      return res.status(422).json({ error: 'draft_order_user_errors', errors: userErrors });
+    }
+
+    const draftOrder = result?.draftOrder;
+    return res.json({
+      success: true,
+      invoiceUrl: draftOrder?.invoiceUrl || null,
+      draftOrderId: draftOrder?.id || null,
+      draftOrderName: draftOrder?.name || null,
     });
   } catch (error) {
-    console.error(error);
-    return createErrorResponse(res, 500, 'internal_error');
+    console.error('create-draft-order error', error);
+    return res.status(500).json({ error: 'internal_error', message: error.message });
   }
 });
 
-app.use((req, res) => {
-  createErrorResponse(res, 404, 'not_found');
-});
+app.use((req, res) => res.status(404).json({ error: 'not_found' }));
 
+// eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(500).json({ error: 'internal_error' });
 });
 
-if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-  });
+const PORT = process.env.PORT || 3000;
+if (process.env.VERCEL !== '1') {
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 }
 
-module.exports = async function handler(req, res) {
-  return new Promise((resolve, reject) => {
-    app(req, res, (err) => {
-      if (err) {
-        console.error(err);
-        if (!res.headersSent) {
-          res.statusCode = 500;
-          res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ error: 'internal_error' }));
-        }
-        reject(err);
-      } else {
-        resolve();
-      }
-    });
-  });
-};
+export default app;
